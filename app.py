@@ -1,105 +1,3 @@
-# from flask import Flask, request, jsonify
-# from flask_pymongo import PyMongo
-# from flask_bcrypt import Bcrypt
-# from flask_jwt_extended import JWTManager, create_access_token
-# import datetime
-# from config import MONGO_URI, DB_NAME, JWT_SECRET_KEY, SECRET_KEY
-# from flask_cors import CORS
-# from flask_jwt_extended import jwt_required, get_jwt_identity
-# from bson.objectid import ObjectId
-
-# app = Flask(__name__)
-# CORS(app)
-
-# # ✅ Konfigurasi MongoDB
-# app.config["MONGO_URI"] = f"{MONGO_URI}/{DB_NAME}"
-# app.config['SECRET_KEY'] = SECRET_KEY  # Pastikan SECRET_KEY ada di config
-# app.config['JWT_SECRET_KEY'] = JWT_SECRET_KEY
-
-# mongo = PyMongo(app)
-# bcrypt = Bcrypt(app)
-# jwt = JWTManager(app)
-
-# @app.route('/register', methods=['POST'])
-# def register():
-#     data = request.get_json()
-#     username = data.get('username')
-#     email = data.get('email')
-#     password = data.get('password')
-
-#     if not email or not password:
-#         return jsonify({'message': 'Email and password are required'}), 400
-
-#     existing_user = mongo.db.users.find_one({'email': email})
-#     if existing_user:
-#         return jsonify({'message': 'User already exists'}), 409
-
-#     hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-
-#     new_user = {
-#         'username': username,
-#         'email': email,
-#         'password': hashed_password,
-#         'created_at': datetime.datetime.utcnow()
-#     }
-
-#     mongo.db.users.insert_one(new_user)
-
-#     return jsonify({'message': 'User registered successfully'}), 201
-
-# @app.route('/login', methods=['POST'])
-# def login():
-#     data = request.get_json()
-#     email = data.get('email')
-#     password = data.get('password')
-
-#     if not email or not password:
-#         return jsonify({'message': 'Email and password are required'}), 400
-
-#     user = mongo.db.users.find_one({'email': email})
-#     if not user or not bcrypt.check_password_hash(user['password'], password):
-#         return jsonify({'message': 'Invalid email or password'}), 401
-
-#     expires = datetime.timedelta(hours=1)
-#     access_token = create_access_token(identity=str(user['_id']), expires_delta=expires)
-
-#     user_data = {
-#         'id': str(user['_id']),
-#         'username': user['username'],
-#         'email': user['email'],
-#         'created_at': user['created_at'].strftime('%Y-%m-%d %H:%M:%S')
-#     }
-
-#     return jsonify({
-#         'access_token': access_token,
-#         'data': user_data,
-#         'message': 'Login successful'
-#     }), 200
-
-# @app.route('/user', methods=['GET'])
-# @jwt_required()
-# def get_user():
-#     user_id = get_jwt_identity() 
-
-#     user = mongo.db.users.find_one({'_id': ObjectId(user_id)})
-#     if not user:
-#         return jsonify({'message': 'User not found'}), 404
-
-#     user_data = {
-#         'id': str(user['_id']),
-#         'username': user['username'],
-#         'email': user['email'],
-#         'created_at': user['created_at'].strftime('%Y-%m-%d %H:%M:%S')
-#     }
-
-#     return jsonify({'data': user_data, 'message': 'User fetched successfully'}), 200
-
-
-# if __name__ == '__main__':
-#     app.run(debug=True, host='0.0.0.0', port=5000)
-
-
-
 from flask import Flask, request, jsonify
 from flask_pymongo import PyMongo
 from flask_bcrypt import Bcrypt
@@ -116,6 +14,8 @@ import cloudinary
 from config import cloudinary_config  
 import base64
 from io import BytesIO
+from google.oauth2 import id_token
+from google.auth.transport import requests
 
 
 app = Flask(__name__)
@@ -599,8 +499,85 @@ def get_deteksi():
     except Exception as e:
         print('Error ambil history:', e)
         return jsonify({'message': 'Gagal mengambil history pose'}), 500
+    
 
 
+@app.route('/auth/google', methods=['POST'])
+def google_auth():
+    data = request.get_json()
+    id_token_string = data.get('id_token')
+    email = data.get('email')
+    name = data.get('name')
+    photo_url = data.get('photo_url')
+    
+    if not email or not name:
+        return jsonify({'message': 'Email dan name wajib diisi'}), 400
+    
+    # OPSIONAL: Verifikasi ID Token untuk keamanan ekstra
+    if id_token_string:
+        try:
+            # Ganti dengan Client ID dari Google Console
+            CLIENT_ID = "751384058788-cms6sjk8ev04rgtrmto9qg4tg2hcauuj.apps.googleusercontent.com"
+            idinfo = id_token.verify_oauth2_token(
+                id_token_string, 
+                requests.Request(), 
+                CLIENT_ID
+            )
+            
+            # Pastikan email cocok
+            if idinfo['email'] != email:
+                return jsonify({'message': 'Email tidak cocok dengan token'}), 400
+                
+            print("ID Token terverifikasi untuk:", idinfo['email'])
+            
+        except ValueError as e:
+            print("ID Token tidak valid:", e)
+            # Bisa tetap lanjut atau return error, tergantung kebutuhan
+            # return jsonify({'message': 'Token tidak valid'}), 401
+    
+    # Cek apakah user sudah ada
+    user = mongo.db.users.find_one({'email': email})
+    
+    if not user:
+        # Buat user baru
+        new_user = {
+            'username': name,
+            'email': email,
+            'auth_provider': 'google',
+            'photo_url': photo_url,  # Simpan foto Google
+            'otp_verified': True,
+            'created_at': datetime.utcnow()
+        }
+        result = mongo.db.users.insert_one(new_user)
+        user_id = str(result.inserted_id)
+        user = new_user
+        user['_id'] = result.inserted_id
+    else:
+        user_id = str(user['_id'])
+        # Update foto jika ada
+        if photo_url:
+            mongo.db.users.update_one(
+                {'_id': user['_id']},
+                {'$set': {'photo_url': photo_url}}
+            )
+    
+    # Buat JWT token
+    expires = timedelta(hours=1)
+    access_token = create_access_token(identity=user_id, expires_delta=expires)
+    
+    user_data = {
+        'id': user_id,
+        'username': user['username'],
+        'email': user['email'],
+        'photo_url': user.get('photo_url'),
+        'created_at': user['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    return jsonify({
+        'access_token': access_token,
+        'data': user_data,
+        'message': 'Login berhasil'
+    }), 200
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
